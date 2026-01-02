@@ -33,8 +33,11 @@ class DataProcessorApp(tk.Tk):
         btn_frame = ttk.Frame(header_frame)
         btn_frame.pack(side=tk.RIGHT)
         
-        ttk.Button(btn_frame, text="Chọn file Excel/CSV", command=self.pick_file).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Xuất Excel", command=self.export_file).pack(side=tk.LEFT, padx=5)
+        # Save references to buttons to disable them later
+        self.btn_pick = ttk.Button(btn_frame, text="Chọn file Excel/CSV", command=self.pick_file)
+        self.btn_pick.pack(side=tk.LEFT, padx=5)
+        self.btn_export = ttk.Button(btn_frame, text="Xuất Excel", command=self.export_file)
+        self.btn_export.pack(side=tk.LEFT, padx=5)
 
         # Status & Progress
         self.status_var = tk.StringVar(value="Sẵn sàng")
@@ -56,8 +59,10 @@ class DataProcessorApp(tk.Tk):
         
         filter_actions = ttk.Frame(self.filter_frame_container)
         filter_actions.pack(fill=tk.X, pady=5)
-        ttk.Button(filter_actions, text="+ Thêm điều kiện", command=self._add_filter_row).pack(side=tk.LEFT)
-        ttk.Button(filter_actions, text="Áp dụng bộ lọc", command=self._apply_filters).pack(side=tk.LEFT, padx=10)
+        self.btn_filter_add = ttk.Button(filter_actions, text="+ Thêm điều kiện", command=self._add_filter_row)
+        self.btn_filter_add.pack(side=tk.LEFT)
+        self.btn_filter_apply = ttk.Button(filter_actions, text="Áp dụng bộ lọc", command=self._apply_filters)
+        self.btn_filter_apply.pack(side=tk.LEFT, padx=10)
 
         # Data Treeview
         tree_frame = ttk.Frame(self, padding=10)
@@ -84,10 +89,12 @@ class DataProcessorApp(tk.Tk):
         center_nav = ttk.Frame(nav_frame)
         center_nav.pack(anchor=tk.CENTER)
         
-        ttk.Button(center_nav, text="< Trước", command=self.prev_page).pack(side=tk.LEFT)
+        self.btn_prev = ttk.Button(center_nav, text="< Trước", command=self.prev_page)
+        self.btn_prev.pack(side=tk.LEFT)
         self.page_label = ttk.Label(center_nav, text="Trang 1")
         self.page_label.pack(side=tk.LEFT, padx=10)
-        ttk.Button(center_nav, text="Sau >", command=self.next_page).pack(side=tk.LEFT)
+        self.btn_next = ttk.Button(center_nav, text="Sau >", command=self.next_page)
+        self.btn_next.pack(side=tk.LEFT)
 
     def _check_existing_data(self):
         if self.db.check_existing_db():
@@ -96,47 +103,70 @@ class DataProcessorApp(tk.Tk):
         else:
             self.status_var.set("Chưa có dữ liệu. Vui lòng chọn file.")
 
+    def _toggle_ui(self, state):
+        """Enable or disable all interactive buttons."""
+        for btn in [self.btn_pick, self.btn_export, self.btn_filter_add, self.btn_filter_apply, self.btn_prev, self.btn_next]:
+            btn.config(state=state)
+
     def pick_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Excel/CSV Files", "*.csv *.xlsx *.xls")])
         if file_path:
-            self.status_var.set(f"Đang phân tích: {os.path.basename(file_path)}...")
-            self.progress_bar.start(10)
+            self.status_var.set(f"Đang chuẩn bị: {os.path.basename(file_path)}...")
+            self._toggle_ui("disabled") # Disable UI
+            
+            # Start thread
             threading.Thread(target=self._process_file_thread, args=(file_path,), daemon=True).start()
 
     def _count_lines(self, filename):
-        f = open(filename, 'rb')
-        lines = 0
-        buf_size = 1024 * 1024
-        read_f = f.raw.read
-        buf = read_f(buf_size)
-        while buf:
-            lines += buf.count(b'\n')
+        try:
+            f = open(filename, 'rb')
+            lines = 0
+            buf_size = 1024 * 1024
+            read_f = f.raw.read
             buf = read_f(buf_size)
-        f.close()
-        return lines
+            while buf:
+                lines += buf.count(b'\n')
+                buf = read_f(buf_size)
+            f.close()
+            return lines
+        except:
+            return 0
 
     def _process_file_thread(self, file_path):
         try:
-            self.progress_bar.stop()
-            self.progress_bar['mode'] = 'determinate'
-            self.progress_var.set(0)
-            
-            # Estimate total rows
-            total_rows = 0
             ext = os.path.splitext(file_path)[1].lower()
+            total_rows = 0
+            
+            # For CSV, we can count lines. For Excel, it's indeterminate (until loaded).
             if ext == '.csv':
                 self.after(0, lambda: self.status_var.set("Đang đếm số dòng..."))
+                self.after(0, lambda: self.progress_bar.configure(mode='indeterminate'))
+                self.after(0, self.progress_bar.start, 10)
+                
                 total_rows = self._count_lines(file_path)
-            
-            self.after(0, lambda: self.status_var.set(f"Đang import... (Tổng: {total_rows} dòng)"))
+                
+                self.after(0, self.progress_bar.stop)
+                self.after(0, lambda: self.progress_bar.configure(mode='determinate'))
+                self.after(0, lambda: self.progress_var.set(0))
+                
+                if total_rows > 0:
+                    self.after(0, lambda: self.status_var.set(f"Đang import... (Tổng: {total_rows} dòng)"))
+                else:
+                    self.after(0, lambda: self.status_var.set("Đang import..."))
+            else:
+                # Excel: indeterminate progress
+                self.after(0, lambda: self.status_var.set("Đang đọc file Excel (có thể mất vài giây)..."))
+                self.after(0, lambda: self.progress_bar.configure(mode='indeterminate'))
+                self.after(0, self.progress_bar.start, 10)
 
             def progress_cb(processed):
-                if total_rows > 0:
+                # Updating UI from thread needs care
+                if ext == '.csv' and total_rows > 0:
                     pct = (processed / total_rows) * 100
                     self.after(0, lambda p=pct: self.progress_var.set(p))
                     self.after(0, lambda p=processed: self.status_var.set(f"Đã import {p}/{total_rows} dòng ({int((p/total_rows)*100)}%)"))
                 else:
-                    self.after(0, lambda p=processed: self.status_var.set(f"Đã import {p} dòng"))
+                    self.after(0, lambda p=processed: self.status_var.set(f"Đã import {p} dòng..."))
             
             self.db.import_file(file_path, progress_callback=progress_cb)
             self.after(0, self._on_import_success)
@@ -144,14 +174,22 @@ class DataProcessorApp(tk.Tk):
         except Exception as e:
             self.after(0, lambda: messagebox.showerror("Lỗi", str(e)))
             self.after(0, lambda: self.status_var.set("Lỗi import"))
-        finally:
             self.after(0, self.progress_bar.stop)
+            self.after(0, lambda: self._toggle_ui("normal")) # Re-enable UI on error logic
+        finally:
+            # For success case, re-enable is handled in _on_import_success
+            pass
 
     def _on_import_success(self):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode='determinate')
+        self.progress_var.set(100)
         self.status_var.set("Import thành công!")
-        # Clear filters on new import? Maybe keep them? Let's clear to avoid stale cols
+        
+        # Clear filters on new import
         self._clear_filters()
         self.current_page = 1
+        self._toggle_ui("normal") # Re-enable UI
         self._update_table()
 
     def _clear_filters(self):

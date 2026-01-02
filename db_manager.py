@@ -4,8 +4,13 @@ import os
 from typing import List, Tuple, Optional, Any
 
 class DBManager:
-    def __init__(self, db_path: str = "temp_data.db"):
-        self.db_path = db_path
+    def __init__(self, db_name: str = "temp_data.db"):
+        # Use a safe, writable user directory
+        user_dir = os.path.join(os.path.expanduser("~"), ".large_data_processor")
+        if not os.path.exists(user_dir):
+            os.makedirs(user_dir)
+        
+        self.db_path = os.path.join(user_dir, db_name)
         self.table_name = "data_table"
         self.columns = []
 
