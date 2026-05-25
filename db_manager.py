@@ -17,6 +17,14 @@ class DBManager:
     def _get_connection(self):
         return sqlite3.connect(self.db_path)
 
+    def create_indexes(self):
+        """Creates indexes on all columns. Call after import_file() completes."""
+        if not self.columns:
+            return
+        with self._get_connection() as conn:
+            for col in self.columns:
+                conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{col}" ON "{self.table_name}" ("{col}")')
+
     def check_existing_db(self) -> bool:
         """Checks if a DB file exists and loads column info if it does."""
         if os.path.exists(self.db_path):
@@ -50,9 +58,6 @@ class DBManager:
                     if first_chunk:
                         self.columns = chunk.columns.tolist()
                         chunk.to_sql(self.table_name, conn, if_exists='replace', index=False)
-                        # Create indexes
-                        for col in self.columns:
-                            conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{col}" ON "{self.table_name}" ("{col}")')
                         first_chunk = False
                     else:
                         chunk.to_sql(self.table_name, conn, if_exists='append', index=False)
@@ -61,15 +66,55 @@ class DBManager:
                     if progress_callback:
                         progress_callback(processed_rows)
 
+            self.create_indexes()
+
         elif extension in ['.xlsx', '.xls']:
-            df = pd.read_excel(file_path)
-            df.columns = [c.strip() for c in df.columns]
-            self.columns = df.columns.tolist()
-            with self._get_connection() as conn:
-                df.to_sql(self.table_name, conn, if_exists='replace', index=False)
-            processed_rows = len(df)
-            if progress_callback:
-                progress_callback(processed_rows)
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            ws = wb.active
+
+            columns = None
+            rows_buffer_values = []
+            first_chunk = True
+
+            try:
+                for row in ws.iter_rows(values_only=True):
+                    if columns is None:
+                        columns = [str(c).strip() if c is not None else f"col_{j}"
+                                   for j, c in enumerate(row)]
+                        self.columns = columns
+                    else:
+                        rows_buffer_values.append(row)
+
+                    if len(rows_buffer_values) >= chunk_size:
+                        temp_df = pd.DataFrame(rows_buffer_values, columns=columns)
+                        rows_buffer_values = []
+
+                        with self._get_connection() as conn:
+                            temp_df.to_sql(self.table_name, conn,
+                                          if_exists='replace' if first_chunk else 'append',
+                                          index=False)
+                            first_chunk = False
+
+                        processed_rows += len(temp_df)
+                        if progress_callback:
+                            progress_callback(processed_rows)
+
+                # Flush remaining rows
+                if rows_buffer_values:
+                    temp_df = pd.DataFrame(rows_buffer_values, columns=columns)
+                    with self._get_connection() as conn:
+                        temp_df.to_sql(self.table_name, conn,
+                                      if_exists='replace' if first_chunk else 'append',
+                                      index=False)
+                    processed_rows += len(temp_df)
+                    if progress_callback:
+                        progress_callback(processed_rows)
+            finally:
+                wb.close()
+                del wb
+
+            self.create_indexes()
         else:
             raise ValueError("Unsupported file format")
 
@@ -175,10 +220,20 @@ class DBManager:
         return self.columns
 
     def export_filtered_data(self, filters: List[dict] = None):
-        """Returns dataframe for the filtered set."""
+        """Returns dataframe for the filtered set (full in-memory)."""
         query = f'SELECT * FROM "{self.table_name}"'
         where_clause, params = self._build_where_clause(filters)
         query += where_clause
 
-        conn = self._get_connection()
-        return pd.read_sql_query(query, conn, params=params)
+        with self._get_connection() as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
+    def export_filtered_data_streaming(self, filters: List[dict] = None, chunk_size: int = 100000):
+        """Yields DataFrames chunk-by-chunk from SQLite for memory-efficient export."""
+        query = f'SELECT * FROM "{self.table_name}"'
+        where_clause, params = self._build_where_clause(filters)
+        query += where_clause
+
+        with self._get_connection() as conn:
+            for chunk in pd.read_sql_query(query, conn, params=params, chunksize=chunk_size):
+                yield chunk
